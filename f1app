@@ -1,0 +1,827 @@
+import streamlit as st
+import requests
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, date
+
+# ── Config ────────────────────────────────────────────────────────────────────
+BASE_URL = "https://api.jolpi.ca/ergast/f1"
+SEASON = datetime.now().year
+
+TEAM_COLORS = {
+    "Red Bull": "#3671C6",
+    "Ferrari": "#E8002D",
+    "Mercedes": "#27F4D2",
+    "McLaren": "#FF8000",
+    "Aston Martin": "#229971",
+    "Alpine": "#FF87BC",
+    "Williams": "#64C4FF",
+    "Racing Bulls": "#6692FF",
+    "RB F1 Team": "#6692FF",
+    "Kick Sauber": "#52E252",
+    "Sauber": "#52E252",
+    "Haas": "#B6BABD",
+    "Haas F1 Team": "#B6BABD",
+}
+
+st.set_page_config(
+    page_title=f"F1 {SEASON} Tracker",
+    page_icon="🏎️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.6rem;
+        font-weight: 900;
+        background: linear-gradient(90deg, #E10600 0%, #FF8000 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        text-align: center;
+        padding: 0.6rem 0 1.2rem 0;
+        letter-spacing: -1px;
+    }
+    .next-race-banner {
+        background: linear-gradient(135deg, #E10600, #c20500);
+        border-radius: 12px;
+        padding: 18px 24px;
+        color: white;
+        font-weight: 700;
+        margin-bottom: 1.2rem;
+        line-height: 1.8;
+    }
+    .flag-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── API helpers ───────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch(url: str) -> dict | None:
+    try:
+        r = requests.get(url, timeout=12)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"API error ({url}): {e}")
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_schedule() -> pd.DataFrame:
+    data = _fetch(f"{BASE_URL}/{SEASON}.json?limit=30")
+    if not data:
+        return pd.DataFrame()
+    races = data["MRData"]["RaceTable"]["Races"]
+    rows = []
+    for r in races:
+        rows.append({
+            "Round": int(r["round"]),
+            "Grand Prix": r["raceName"],
+            "Circuit": r["Circuit"]["circuitName"],
+            "Country": r["Circuit"]["Location"]["country"],
+            "City": r["Circuit"]["Location"]["locality"],
+            "Date": r["date"],
+            "Time": r.get("time", "TBC"),
+        })
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_race_results(round_num: int) -> pd.DataFrame:
+    data = _fetch(f"{BASE_URL}/{SEASON}/{round_num}/results.json")
+    if not data:
+        return pd.DataFrame()
+    races = data["MRData"]["RaceTable"]["Races"]
+    if not races:
+        return pd.DataFrame()
+    rows = []
+    for r in races[0]["Results"]:
+        rows.append({
+            "Pos": int(r["position"]),
+            "Driver": f"{r['Driver']['givenName']} {r['Driver']['familyName']}",
+            "Code": r["Driver"].get("code", "???"),
+            "Constructor": r["Constructor"]["name"],
+            "Grid": int(r["grid"]),
+            "Laps": int(r["laps"]),
+            "Status": r["status"],
+            "Points": float(r["points"]),
+            "Time / Status": r.get("Time", {}).get("time", r["status"]),
+            "Fastest Lap": r.get("FastestLap", {}).get("Time", {}).get("time", ""),
+            "FL Rank": int(r.get("FastestLap", {}).get("rank", 0)) if r.get("FastestLap") else 0,
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_driver_standings() -> pd.DataFrame:
+    data = _fetch(f"{BASE_URL}/{SEASON}/driverStandings.json")
+    if not data:
+        return pd.DataFrame()
+    lists = data["MRData"]["StandingsTable"]["StandingsLists"]
+    if not lists:
+        return pd.DataFrame()
+    rows = []
+    for s in lists[0]["DriverStandings"]:
+        rows.append({
+            "Pos": int(s["position"]),
+            "Driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}",
+            "Code": s["Driver"].get("code", ""),
+            "Nationality": s["Driver"]["nationality"],
+            "Constructor": s["Constructors"][0]["name"],
+            "Points": float(s["points"]),
+            "Wins": int(s["wins"]),
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_constructor_standings() -> pd.DataFrame:
+    data = _fetch(f"{BASE_URL}/{SEASON}/constructorStandings.json")
+    if not data:
+        return pd.DataFrame()
+    lists = data["MRData"]["StandingsTable"]["StandingsLists"]
+    if not lists:
+        return pd.DataFrame()
+    rows = []
+    for s in lists[0]["ConstructorStandings"]:
+        rows.append({
+            "Pos": int(s["position"]),
+            "Constructor": s["Constructor"]["name"],
+            "Nationality": s["Constructor"]["nationality"],
+            "Points": float(s["points"]),
+            "Wins": int(s["wins"]),
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_qualifying(round_num: int) -> pd.DataFrame:
+    data = _fetch(f"{BASE_URL}/{SEASON}/{round_num}/qualifying.json")
+    if not data:
+        return pd.DataFrame()
+    races = data["MRData"]["RaceTable"]["Races"]
+    if not races:
+        return pd.DataFrame()
+    rows = []
+    for r in races[0]["QualifyingResults"]:
+        rows.append({
+            "Pos": int(r["position"]),
+            "Driver": f"{r['Driver']['givenName']} {r['Driver']['familyName']}",
+            "Code": r["Driver"].get("code", ""),
+            "Constructor": r["Constructor"]["name"],
+            "Q1": r.get("Q1", "—"),
+            "Q2": r.get("Q2", "—"),
+            "Q3": r.get("Q3", "—"),
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_lap_times(round_num: int) -> pd.DataFrame:
+    all_laps = []
+    offset, limit, cap = 0, 100, 2000
+    while offset < cap:
+        data = _fetch(f"{BASE_URL}/{SEASON}/{round_num}/laps.json?limit={limit}&offset={offset}")
+        if not data:
+            break
+        races = data["MRData"]["RaceTable"]["Races"]
+        if not races:
+            break
+        for lap in races[0].get("Laps", []):
+            n = int(lap["number"])
+            for t in lap["Timings"]:
+                all_laps.append({
+                    "Lap": n,
+                    "Driver": t["driverId"],
+                    "Position": int(t["position"]),
+                    "Time": t["time"],
+                })
+        total = int(data["MRData"]["total"])
+        offset += limit
+        if offset >= total:
+            break
+    if not all_laps:
+        return pd.DataFrame()
+    df = pd.DataFrame(all_laps)
+
+    def to_sec(t):
+        try:
+            m, s = t.split(":")
+            return float(m) * 60 + float(s)
+        except Exception:
+            return None
+
+    df["Seconds"] = df["Time"].apply(to_sec)
+    return df
+
+
+# ── Utility ───────────────────────────────────────────────────────────────────
+
+def next_race(schedule: pd.DataFrame):
+    today = pd.Timestamp(date.today())
+    upcoming = schedule[schedule["Date"] >= today]
+    return upcoming.iloc[0] if not upcoming.empty else None
+
+
+def days_until(dt) -> int:
+    return (dt.date() - date.today()).days
+
+
+def medal(pos: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(pos, f"P{pos}")
+
+
+def team_color(name: str) -> str:
+    for k, v in TEAM_COLORS.items():
+        if k.lower() in name.lower():
+            return v
+    return "#AAAAAA"
+
+
+def dark_layout(fig):
+    fig.update_layout(
+        plot_bgcolor="#111111",
+        paper_bgcolor="#111111",
+        font_color="#EEEEEE",
+        legend=dict(bgcolor="#111111"),
+    )
+    return fig
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+schedule = get_schedule()
+
+with st.sidebar:
+    st.markdown(f"## 🏎️ F1 {SEASON} Season")
+    st.divider()
+
+    nr = next_race(schedule) if not schedule.empty else None
+    if nr is not None:
+        d = days_until(nr["Date"])
+        st.markdown("**Next Race**")
+        st.markdown(f"**{nr['Grand Prix']}**")
+        st.caption(f"📍 {nr['City']}, {nr['Country']}")
+        st.caption(f"📅 {nr['Date'].strftime('%B %d, %Y')}")
+        if d == 0:
+            st.success("🔴 Race Day!")
+        elif d == 1:
+            st.warning("⏱️ Tomorrow!")
+        else:
+            st.info(f"⏱️ {d} days away")
+        st.divider()
+
+    if not schedule.empty:
+        today = pd.Timestamp(date.today())
+        done = len(schedule[schedule["Date"] < today])
+        total = len(schedule)
+        st.markdown(f"**Season Progress:** {done} / {total} races")
+        st.progress(done / total if total else 0)
+        st.divider()
+
+    if st.button("🔄 Refresh All Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.caption(f"Data: Jolpica F1 API")
+    st.caption(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
+
+
+# ── Header ────────────────────────────────────────────────────────────────────
+
+st.markdown(
+    f'<div class="main-header">🏎️ Formula 1 — {SEASON} Season Tracker</div>',
+    unsafe_allow_html=True,
+)
+
+tab_schedule, tab_results, tab_drivers, tab_constructors, tab_qualifying, tab_laps = st.tabs([
+    "📅 Schedule",
+    "🏁 Race Results",
+    "🏆 Drivers",
+    "🏗️ Constructors",
+    "⚡ Qualifying",
+    "📈 Lap Analysis",
+])
+
+
+# ── Tab: Schedule ─────────────────────────────────────────────────────────────
+with tab_schedule:
+    st.header(f"F1 {SEASON} Race Calendar")
+
+    if schedule.empty:
+        st.warning("Season schedule not yet available.")
+    else:
+        today_ts = pd.Timestamp(date.today())
+        completed = schedule[schedule["Date"] < today_ts]
+        upcoming = schedule[schedule["Date"] >= today_ts]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Rounds", len(schedule))
+        c2.metric("Completed", len(completed))
+        c3.metric("Remaining", len(upcoming))
+        st.divider()
+
+        nr = next_race(schedule)
+        if nr is not None:
+            d = days_until(nr["Date"])
+            label = "Race Day! 🔴" if d == 0 else (f"Tomorrow ⚡" if d == 1 else f"{d} days away")
+            st.markdown(f"""
+            <div class="next-race-banner">
+                🔜 NEXT RACE &nbsp;·&nbsp; Round {nr['Round']}<br>
+                <span style="font-size:1.4rem">{nr['Grand Prix'].upper()}</span><br>
+                📍 {nr['Circuit']} &nbsp;·&nbsp; {nr['Country']}<br>
+                📅 {nr['Date'].strftime('%B %d, %Y')} &nbsp;·&nbsp; {label}
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Calendar table
+        disp = schedule.copy()
+        disp["Status"] = disp.apply(
+            lambda row: "✅ Completed" if row["Date"] < today_ts
+            else ("🔜 Next" if (nr is not None and row["Round"] == nr["Round"]) else "📅 Upcoming"),
+            axis=1,
+        )
+        disp["Date"] = disp["Date"].dt.strftime("%b %d, %Y")
+        st.dataframe(
+            disp[["Round", "Grand Prix", "Circuit", "Country", "Date", "Status"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Round": st.column_config.NumberColumn("Rd", width="small"),
+                "Grand Prix": st.column_config.TextColumn("Grand Prix", width="large"),
+                "Status": st.column_config.TextColumn("Status", width="medium"),
+            },
+        )
+
+        # Timeline chart
+        st.subheader("Season Timeline")
+        fig = go.Figure()
+        for _, row in schedule.iterrows():
+            if row["Date"] < today_ts:
+                color, sym = "#4CAF50", "circle"
+            elif nr is not None and row["Round"] == nr["Round"]:
+                color, sym = "#FF8000", "star"
+            else:
+                color, sym = "#2196F3", "circle-open"
+
+            fig.add_trace(go.Scatter(
+                x=[row["Date"]],
+                y=[row["Country"]],
+                mode="markers+text",
+                marker=dict(size=13, color=color, symbol=sym),
+                text=[f"R{row['Round']}"],
+                textposition="top center",
+                name=row["Grand Prix"],
+                hovertemplate=f"<b>R{row['Round']} {row['Grand Prix']}</b><br>{row['Date'].strftime('%b %d')}<extra></extra>",
+                showlegend=False,
+            ))
+
+        dark_layout(fig)
+        fig.update_layout(
+            height=max(400, len(schedule) * 22),
+            xaxis=dict(showgrid=True, gridcolor="#333"),
+            yaxis=dict(showgrid=False),
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ── Tab: Race Results ─────────────────────────────────────────────────────────
+with tab_results:
+    st.header("Race Results")
+
+    if schedule.empty:
+        st.warning("No schedule data.")
+    else:
+        today_ts = pd.Timestamp(date.today())
+        done_races = schedule[schedule["Date"] < today_ts]
+
+        if done_races.empty:
+            st.info("No races completed yet this season.")
+        else:
+            sel = st.selectbox(
+                "Select Grand Prix",
+                options=done_races["Round"].tolist()[::-1],
+                format_func=lambda x: f"R{x} · {done_races[done_races['Round']==x]['Grand Prix'].values[0]}",
+            )
+            results = get_race_results(sel)
+            race_row = done_races[done_races["Round"] == sel].iloc[0]
+
+            if results.empty:
+                st.warning("Results not yet available.")
+            else:
+                st.subheader(f"🏁 {race_row['Grand Prix']}")
+                st.caption(f"📍 {race_row['Circuit']}  ·  📅 {race_row['Date'].strftime('%B %d, %Y')}")
+                st.divider()
+
+                # Podium
+                st.subheader("Podium")
+                c2, c1, c3 = st.columns(3)
+                for col, pos in [(c1, 1), (c2, 2), (c3, 3)]:
+                    row_p = results[results["Pos"] == pos]
+                    if not row_p.empty:
+                        r = row_p.iloc[0]
+                        col.metric(
+                            label=medal(pos),
+                            value=r["Driver"],
+                            delta=r["Constructor"],
+                        )
+                st.divider()
+
+                # Full classification
+                st.subheader("Full Classification")
+                disp = results.copy()
+                disp["Pos"] = disp["Pos"].apply(medal)
+                disp["FL"] = disp["FL Rank"].apply(lambda x: "⚡" if x == 1 else "")
+                st.dataframe(
+                    disp[["Pos", "Driver", "Constructor", "Grid", "Laps", "Time / Status", "Points", "Fastest Lap", "FL"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.divider()
+
+                # Points chart
+                points_df = results[results["Points"] > 0].copy()
+                if not points_df.empty:
+                    points_df["Color"] = points_df["Constructor"].apply(team_color)
+                    fig = px.bar(
+                        points_df,
+                        x="Driver", y="Points",
+                        color="Constructor",
+                        color_discrete_map={c: team_color(c) for c in points_df["Constructor"].unique()},
+                        text="Points",
+                        title="Points Scored This Race",
+                    )
+                    dark_layout(fig)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Positions gained/lost
+                st.subheader("Grid → Finish (Positions Gained / Lost)")
+                pg = results[results["Grid"] > 0].copy()
+                pg["Gained"] = pg["Grid"] - pg["Pos"]
+                fig2 = px.bar(
+                    pg, x="Driver", y="Gained",
+                    color=pg["Gained"].apply(lambda x: "Gained" if x >= 0 else "Lost"),
+                    color_discrete_map={"Gained": "#4CAF50", "Lost": "#E10600"},
+                    text="Gained",
+                    title="Positions gained (green) or lost (red) vs grid",
+                )
+                dark_layout(fig2)
+                fig2.update_layout(showlegend=False)
+                st.plotly_chart(fig2, use_container_width=True)
+
+
+# ── Tab: Driver Standings ─────────────────────────────────────────────────────
+with tab_drivers:
+    st.header("Driver Championship Standings")
+    ds = get_driver_standings()
+
+    if ds.empty:
+        st.info("Driver standings not yet available.")
+    else:
+        # Top 3 metrics
+        c1, c2, c3 = st.columns(3)
+        for col, i in zip([c1, c2, c3], [0, 1, 2]):
+            if i < len(ds):
+                r = ds.iloc[i]
+                col.metric(medal(i + 1), r["Driver"], f"{r['Points']} pts · {r['Constructor']}")
+        st.divider()
+
+        st.subheader("Championship Table")
+        disp = ds.copy()
+        disp["Pos"] = disp["Pos"].apply(lambda x: f"P{x}")
+        st.dataframe(
+            disp,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Points": st.column_config.ProgressColumn(
+                    "Points", min_value=0,
+                    max_value=float(ds["Points"].max()), format="%g",
+                ),
+            },
+        )
+        st.divider()
+
+        fig = px.bar(
+            ds, x="Driver", y="Points",
+            color="Constructor",
+            color_discrete_map={c: team_color(c) for c in ds["Constructor"].unique()},
+            text="Points",
+            title="Points by Driver",
+        )
+        dark_layout(fig)
+        fig.update_layout(xaxis_tickangle=-30)
+        st.plotly_chart(fig, use_container_width=True)
+
+        wins_df = ds[ds["Wins"] > 0]
+        if not wins_df.empty:
+            fig2 = px.bar(
+                wins_df, x="Driver", y="Wins",
+                color="Constructor",
+                color_discrete_map={c: team_color(c) for c in wins_df["Constructor"].unique()},
+                text="Wins", title="Race Wins",
+            )
+            dark_layout(fig2)
+            st.plotly_chart(fig2, use_container_width=True)
+
+        # Cumulative points race-by-race
+        st.subheader("Cumulative Points Progression")
+        st.caption("Showing points accumulation across completed rounds")
+
+        if schedule.empty:
+            st.info("Schedule unavailable.")
+        else:
+            today_ts = pd.Timestamp(date.today())
+            done_rounds = schedule[schedule["Date"] < today_ts]["Round"].tolist()
+            if done_rounds:
+                cum_rows = []
+                for rnd in done_rounds:
+                    rr = get_race_results(rnd)
+                    race_name = schedule[schedule["Round"] == rnd]["Grand Prix"].values[0]
+                    if not rr.empty:
+                        for _, r in rr.iterrows():
+                            cum_rows.append({"Round": rnd, "Grand Prix": race_name, "Driver": r["Driver"], "Points": r["Points"]})
+                if cum_rows:
+                    cum_df = pd.DataFrame(cum_rows)
+                    cum_df = cum_df.sort_values("Round")
+                    cum_df["Cumulative"] = cum_df.groupby("Driver")["Points"].cumsum()
+                    top_drivers = ds.head(10)["Driver"].tolist()
+                    cum_df = cum_df[cum_df["Driver"].isin(top_drivers)]
+                    fig3 = px.line(
+                        cum_df, x="Grand Prix", y="Cumulative",
+                        color="Driver", markers=True,
+                        title="Top 10 Drivers — Cumulative Points",
+                    )
+                    dark_layout(fig3)
+                    fig3.update_layout(xaxis_tickangle=-30)
+                    st.plotly_chart(fig3, use_container_width=True)
+
+
+# ── Tab: Constructor Standings ────────────────────────────────────────────────
+with tab_constructors:
+    st.header("Constructor Championship Standings")
+    cs = get_constructor_standings()
+
+    if cs.empty:
+        st.info("Constructor standings not yet available.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        for col, i in zip([c1, c2, c3], [0, 1, 2]):
+            if i < len(cs):
+                r = cs.iloc[i]
+                col.metric(medal(i + 1), r["Constructor"], f"{r['Points']} pts")
+        st.divider()
+
+        st.subheader("Championship Table")
+        disp = cs.copy()
+        disp["Pos"] = disp["Pos"].apply(lambda x: f"P{x}")
+        st.dataframe(
+            disp,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Points": st.column_config.ProgressColumn(
+                    "Points", min_value=0,
+                    max_value=float(cs["Points"].max()), format="%g",
+                ),
+            },
+        )
+        st.divider()
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fig = px.pie(
+                cs, values="Points", names="Constructor",
+                color="Constructor",
+                color_discrete_map={c: team_color(c) for c in cs["Constructor"].unique()},
+                hole=0.45, title="Points Share",
+            )
+            dark_layout(fig)
+            st.plotly_chart(fig, use_container_width=True)
+        with col_b:
+            fig2 = px.bar(
+                cs, x="Constructor", y="Points",
+                color="Constructor",
+                color_discrete_map={c: team_color(c) for c in cs["Constructor"].unique()},
+                text="Points", title="Points by Constructor",
+            )
+            dark_layout(fig2)
+            fig2.update_layout(showlegend=False, xaxis_tickangle=-20)
+            st.plotly_chart(fig2, use_container_width=True)
+
+        wins_cs = cs[cs["Wins"] > 0]
+        if not wins_cs.empty:
+            fig3 = px.bar(
+                wins_cs, x="Constructor", y="Wins",
+                color="Constructor",
+                color_discrete_map={c: team_color(c) for c in wins_cs["Constructor"].unique()},
+                text="Wins", title="Race Wins by Constructor",
+            )
+            dark_layout(fig3)
+            fig3.update_layout(showlegend=False)
+            st.plotly_chart(fig3, use_container_width=True)
+
+
+# ── Tab: Qualifying ───────────────────────────────────────────────────────────
+with tab_qualifying:
+    st.header("Qualifying Results")
+
+    if schedule.empty:
+        st.warning("No schedule data.")
+    else:
+        today_ts = pd.Timestamp(date.today())
+        done_races = schedule[schedule["Date"] < today_ts]
+
+        if done_races.empty:
+            st.info("No qualifying results available yet.")
+        else:
+            sel_q = st.selectbox(
+                "Select Grand Prix",
+                options=done_races["Round"].tolist()[::-1],
+                format_func=lambda x: f"R{x} · {done_races[done_races['Round']==x]['Grand Prix'].values[0]}",
+                key="qual_sel",
+            )
+            qual = get_qualifying(sel_q)
+            race_row_q = done_races[done_races["Round"] == sel_q].iloc[0]
+
+            if qual.empty:
+                st.warning("Qualifying data not available for this race.")
+            else:
+                st.subheader(f"⚡ {race_row_q['Grand Prix']} — Qualifying")
+                st.caption(f"📍 {race_row_q['Circuit']}")
+
+                pole = qual.iloc[0]
+                st.success(f"🏁 **Pole Position:** {pole['Driver']} ({pole['Constructor']}) — {pole['Q3']}")
+                st.divider()
+
+                st.dataframe(
+                    qual,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Pos": st.column_config.NumberColumn("P", width="small"),
+                        "Q1": st.column_config.TextColumn("Q1", width="medium"),
+                        "Q2": st.column_config.TextColumn("Q2", width="medium"),
+                        "Q3": st.column_config.TextColumn("Q3", width="medium"),
+                    },
+                )
+
+                # Q3 gap to pole
+                def q_to_sec(t):
+                    try:
+                        m, s = t.split(":")
+                        return float(m) * 60 + float(s)
+                    except Exception:
+                        return None
+
+                q3_df = qual[qual["Q3"] != "—"].copy()
+                if not q3_df.empty:
+                    q3_df["Q3_sec"] = q3_df["Q3"].apply(q_to_sec)
+                    q3_df = q3_df.dropna(subset=["Q3_sec"])
+                    if not q3_df.empty:
+                        pole_sec = q3_df["Q3_sec"].min()
+                        q3_df["Gap to Pole (s)"] = (q3_df["Q3_sec"] - pole_sec).round(3)
+                        fig = px.bar(
+                            q3_df.sort_values("Q3_sec"),
+                            x="Driver", y="Gap to Pole (s)",
+                            color="Constructor",
+                            color_discrete_map={c: team_color(c) for c in q3_df["Constructor"].unique()},
+                            text="Q3", title="Q3 — Gap to Pole Position",
+                        )
+                        dark_layout(fig)
+                        fig.update_layout(xaxis_tickangle=-20)
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # Q1 vs Q2 vs Q3 comparison
+                st.subheader("Session Times Comparison")
+                melt_cols = []
+                for session in ["Q1", "Q2", "Q3"]:
+                    tmp = qual[qual[session] != "—"][["Driver", "Constructor", session]].copy()
+                    tmp["Session"] = session
+                    tmp["Seconds"] = tmp[session].apply(q_to_sec)
+                    tmp = tmp.rename(columns={session: "Time"})
+                    melt_cols.append(tmp)
+                if melt_cols:
+                    all_q = pd.concat(melt_cols).dropna(subset=["Seconds"])
+                    fig2 = px.scatter(
+                        all_q, x="Session", y="Seconds",
+                        color="Driver", symbol="Constructor",
+                        hover_data=["Time"],
+                        title="Driver Times Across Q1 / Q2 / Q3",
+                    )
+                    dark_layout(fig2)
+                    fig2.update_layout(yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig2, use_container_width=True)
+
+
+# ── Tab: Lap Analysis ─────────────────────────────────────────────────────────
+with tab_laps:
+    st.header("Lap Time Analysis")
+
+    if schedule.empty:
+        st.warning("No schedule data.")
+    else:
+        today_ts = pd.Timestamp(date.today())
+        done_races = schedule[schedule["Date"] < today_ts]
+
+        if done_races.empty:
+            st.info("No completed races yet.")
+        else:
+            sel_l = st.selectbox(
+                "Select Grand Prix",
+                options=done_races["Round"].tolist()[::-1],
+                format_func=lambda x: f"R{x} · {done_races[done_races['Round']==x]['Grand Prix'].values[0]}",
+                key="lap_sel",
+            )
+            race_row_l = done_races[done_races["Round"] == sel_l].iloc[0]
+
+            with st.spinner("Loading lap data (this may take a few seconds)…"):
+                laps = get_lap_times(sel_l)
+
+            if laps.empty:
+                st.warning("Lap time data unavailable for this race.")
+            else:
+                st.subheader(f"📈 {race_row_l['Grand Prix']} — Lap Times")
+
+                all_drivers = sorted(laps["Driver"].unique())
+                sel_drivers = st.multiselect(
+                    "Select drivers (blank = top 5 finishers)",
+                    options=all_drivers,
+                    default=[],
+                )
+
+                if not sel_drivers:
+                    rr = get_race_results(sel_l)
+                    if not rr.empty:
+                        top5 = rr.head(5)["Code"].str.lower().tolist()
+                        plot_laps = laps[laps["Driver"].isin(top5)]
+                    else:
+                        plot_laps = laps[laps["Driver"].isin(all_drivers[:5])]
+                else:
+                    plot_laps = laps[laps["Driver"].isin(sel_drivers)]
+
+                # Remove outliers (pit stop laps etc.) — anything > 130% of median
+                med = plot_laps["Seconds"].median()
+                clean_laps = plot_laps[plot_laps["Seconds"] < med * 1.30].copy()
+
+                # Lap times line chart
+                fig = px.line(
+                    clean_laps, x="Lap", y="Seconds",
+                    color="Driver", markers=False,
+                    title="Lap Times per Lap (outliers removed)",
+                )
+                dark_layout(fig)
+                fig.update_layout(hovermode="x unified")
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Race position chart
+                fig2 = px.line(
+                    plot_laps, x="Lap", y="Position",
+                    color="Driver",
+                    title="Race Position Through Laps",
+                )
+                dark_layout(fig2)
+                fig2.update_layout(
+                    yaxis=dict(autorange="reversed", title="Position"),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+
+                # Fastest lap summary
+                st.subheader("Fastest Lap Summary")
+                fl = laps.groupby("Driver")["Seconds"].min().reset_index()
+                fl.columns = ["Driver", "Best (s)"]
+                fl["Fastest Lap"] = fl["Best (s)"].apply(
+                    lambda s: f"{int(s//60)}:{s%60:06.3f}" if s else "N/A"
+                )
+                fl = fl.sort_values("Best (s)").reset_index(drop=True)
+                pole_sec = fl["Best (s)"].iloc[0]
+                fl["Gap"] = fl["Best (s)"].apply(
+                    lambda s: "Fastest ⚡" if s == pole_sec else f"+{s - pole_sec:.3f}s"
+                )
+                st.dataframe(fl[["Driver", "Fastest Lap", "Gap"]], use_container_width=True, hide_index=True)
+
+                # Pace distribution box plot
+                st.subheader("Pace Distribution (Cleaned Laps)")
+                fig3 = px.box(
+                    clean_laps, x="Driver", y="Seconds",
+                    color="Driver",
+                    title="Lap Time Distribution per Driver",
+                    points=False,
+                )
+                dark_layout(fig3)
+                fig3.update_layout(showlegend=False, xaxis_tickangle=-20)
+                st.plotly_chart(fig3, use_container_width=True)
