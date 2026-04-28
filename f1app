@@ -123,6 +123,23 @@ def get_race_results(round_num: int) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_all_season_results() -> pd.DataFrame:
+    data = _fetch(f"{BASE_URL}/{SEASON}/results.json?limit=1000")
+    if not data:
+        return pd.DataFrame()
+    races = data["MRData"]["RaceTable"]["Races"]
+    rows = []
+    for race in races:
+        for r in race["Results"]:
+            rows.append({
+                "Round": int(race["round"]),
+                "Grand Prix": race["raceName"],
+                "Driver": f"{r['Driver']['givenName']} {r['Driver']['familyName']}",
+                "Constructor": r["Constructor"]["name"],
+                "Points": float(r["points"]),
+            })
+    return pd.DataFrame(rows)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_driver_standings() -> pd.DataFrame:
@@ -541,33 +558,22 @@ with tab_drivers:
         st.subheader("Cumulative Points Progression")
         st.caption("Showing points accumulation across completed rounds")
 
-        if schedule.empty:
-            st.info("Schedule unavailable.")
+        cum_df = get_all_season_results()
+        if cum_df.empty:
+            st.info("Season results not yet available.")
         else:
-            today_ts = pd.Timestamp(date.today())
-            done_rounds = schedule[schedule["Date"] < today_ts]["Round"].tolist()
-            if done_rounds:
-                cum_rows = []
-                for rnd in done_rounds:
-                    rr = get_race_results(rnd)
-                    race_name = schedule[schedule["Round"] == rnd]["Grand Prix"].values[0]
-                    if not rr.empty:
-                        for _, r in rr.iterrows():
-                            cum_rows.append({"Round": rnd, "Grand Prix": race_name, "Driver": r["Driver"], "Points": r["Points"]})
-                if cum_rows:
-                    cum_df = pd.DataFrame(cum_rows)
-                    cum_df = cum_df.sort_values("Round")
-                    cum_df["Cumulative"] = cum_df.groupby("Driver")["Points"].cumsum()
-                    top_drivers = ds.head(10)["Driver"].tolist()
-                    cum_df = cum_df[cum_df["Driver"].isin(top_drivers)]
-                    fig3 = px.line(
-                        cum_df, x="Grand Prix", y="Cumulative",
-                        color="Driver", markers=True,
-                        title="Top 10 Drivers — Cumulative Points",
-                    )
-                    dark_layout(fig3)
-                    fig3.update_layout(xaxis_tickangle=-30)
-                    st.plotly_chart(fig3, use_container_width=True)
+            cum_df = cum_df.sort_values("Round")
+            cum_df["Cumulative"] = cum_df.groupby("Driver")["Points"].cumsum()
+            top_drivers = ds.head(10)["Driver"].tolist()
+            cum_df = cum_df[cum_df["Driver"].isin(top_drivers)]
+            fig3 = px.line(
+                cum_df, x="Grand Prix", y="Cumulative",
+                color="Driver", markers=True,
+                title="Top 10 Drivers — Cumulative Points",
+            )
+            dark_layout(fig3)
+            fig3.update_layout(xaxis_tickangle=-30)
+            st.plotly_chart(fig3, use_container_width=True)
 
 
 # ── Tab: Constructor Standings ────────────────────────────────────────────────
